@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_EXAMPLES_SCHED_STATS_TEST),)
+CONFIGURED_APPS += $(APPDIR)/examples/sched_stats_test
+endif

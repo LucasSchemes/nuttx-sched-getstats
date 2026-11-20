@@ -1,0 +1,21 @@
+config EXAMPLES_SCHED_STATS_TEST
+	tristate "Scheduler stats syscall test"
+	default n
+	---help---
+		Habilita a aplicacao de teste da chamada de sistema sched_getstats().
+
+if EXAMPLES_SCHED_STATS_TEST
+
+config EXAMPLES_SCHED_STATS_TEST_PROGNAME
+	string "Program name"
+	default "sched_stats_test"
+
+config EXAMPLES_SCHED_STATS_TEST_PRIORITY
+	int "Task priority"
+	default 100
+
+config EXAMPLES_SCHED_STATS_TEST_STACKSIZE
+	int "Stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif
