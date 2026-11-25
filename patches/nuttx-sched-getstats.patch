@@ -1,0 +1,247 @@
+diff --git a/include/nuttx/sched.h b/include/nuttx/sched.h
+index 75fedb3a55..5b0307ce55 100644
+--- a/include/nuttx/sched.h
++++ b/include/nuttx/sched.h
+@@ -1295,6 +1295,8 @@ size_t nxtask_argvstr(FAR struct tcb_s *tcb, FAR char *args, size_t size);
+  ****************************************************************************/
+ 
+ int nxsched_get_param(pid_t pid, FAR struct sched_param *);
++struct sched_stats_s;
++int nxsched_get_stats(FAR struct sched_stats_s *stats, unsigned int flags);
+ 
+ /****************************************************************************
+  * Name:  nxsched_set_param
+diff --git a/include/sys/sched_stats.h b/include/sys/sched_stats.h
+new file mode 100644
+index 0000000000..3a9b5ca9c2
+--- /dev/null
++++ b/include/sys/sched_stats.h
+@@ -0,0 +1,45 @@
++#ifndef __INCLUDE_SYS_SCHED_STATS_H
++#define __INCLUDE_SYS_SCHED_STATS_H
++
++#include <nuttx/config.h>
++#include <nuttx/compiler.h>
++#include <stdint.h>
++
++#define SCHED_STATS_ALL        0x00u
++#define SCHED_STATS_NO_IDLE    0x01u
++#define SCHED_STATS_VALID_MASK (SCHED_STATS_NO_IDLE)
++
++struct sched_stats_s
++{
++  uint32_t total_tasks;
++  uint32_t running_tasks;
++  uint32_t ready_tasks;
++  uint32_t blocked_sem;
++  uint32_t blocked_sig;
++  uint32_t blocked_other;
++  uint32_t kernel_threads;
++  uint32_t user_tasks;
++  uint32_t pthreads;
++  uint32_t pidhash_size;
++  uint32_t sched_ticks;
++  uint8_t  min_priority;
++  uint8_t  max_priority;
++};
++
++#undef EXTERN
++#if defined(__cplusplus)
++#define EXTERN extern "C"
++extern "C"
++{
++#else
++#define EXTERN extern
++#endif
++
++int sched_getstats(FAR struct sched_stats_s *stats, unsigned int flags);
++
++#undef EXTERN
++#if defined(__cplusplus)
++}
++#endif
++
++#endif
+diff --git a/sched/sched/CMakeLists.txt b/sched/sched/CMakeLists.txt
+index 5daf47917b..1ed1cb254d 100644
+--- a/sched/sched/CMakeLists.txt
++++ b/sched/sched/CMakeLists.txt
+@@ -32,6 +32,7 @@ set(SRCS
+     sched_setparam.c
+     sched_setpriority.c
+     sched_getparam.c
++    sched_getstats.c
+     sched_setscheduler.c
+     sched_getscheduler.c
+     sched_yield.c
+diff --git a/sched/sched/Make.defs b/sched/sched/Make.defs
+index a7e5bb8a61..aa315f816a 100644
+--- a/sched/sched/Make.defs
++++ b/sched/sched/Make.defs
+@@ -24,7 +24,7 @@ CSRCS += sched_getfiles.c sched_profil.c
+ CSRCS += sched_addreadytorun.c sched_removereadytorun.c
+ CSRCS += sched_addblocked.c sched_removeblocked.c
+ CSRCS += sched_gettcb.c sched_verifytcb.c sched_releasetcb.c
+-CSRCS += sched_setparam.c sched_setpriority.c sched_getparam.c
++CSRCS += sched_setparam.c sched_setpriority.c sched_getparam.c sched_getstats.c
+ CSRCS += sched_setscheduler.c sched_getscheduler.c
+ CSRCS += sched_yield.c sched_rrgetinterval.c sched_foreach.c
+ CSRCS += sched_lock.c sched_unlock.c sched_lockcount.c
+diff --git a/sched/sched/sched_getstats.c b/sched/sched/sched_getstats.c
+new file mode 100644
+index 0000000000..4c3db1d8fc
+--- /dev/null
++++ b/sched/sched/sched_getstats.c
+@@ -0,0 +1,140 @@
++#include <nuttx/config.h>
++
++#include <errno.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/sched_stats.h>
++
++#include <nuttx/clock.h>
++#include <nuttx/irq.h>
++#include <nuttx/sched.h>
++
++#include "sched/sched.h"
++
++int nxsched_get_stats(FAR struct sched_stats_s *stats, unsigned int flags)
++{
++  struct sched_stats_s local;
++  irqstate_t irqflags;
++  uint8_t min_prio = UINT8_MAX;
++  uint8_t max_prio = 0;
++  int i;
++
++  if (stats == NULL)
++    {
++      return -EINVAL;
++    }
++
++  if ((flags & ~SCHED_STATS_VALID_MASK) != 0u)
++    {
++      return -EINVAL;
++    }
++
++  memset(&local, 0, sizeof(local));
++
++  irqflags = enter_critical_section();
++
++  local.sched_ticks  = (uint32_t)clock_systime_ticks();
++  local.pidhash_size = (uint32_t)g_npidhash;
++
++  if (g_pidhash != NULL)
++    {
++      for (i = 0; i < g_npidhash; i++)
++        {
++          FAR struct tcb_s *tcb = g_pidhash[i];
++
++          if (tcb == NULL || tcb->task_state == TSTATE_TASK_INVALID)
++            {
++              continue;
++            }
++
++          if ((flags & SCHED_STATS_NO_IDLE) != 0u &&
++              tcb->sched_priority == 0)
++            {
++              continue;
++            }
++
++          local.total_tasks++;
++
++          switch (tcb->task_state)
++            {
++              case TSTATE_TASK_RUNNING:
++                local.running_tasks++;
++                break;
++
++              case TSTATE_TASK_READYTORUN:
++                local.ready_tasks++;
++                break;
++
++              case TSTATE_TASK_PENDING:
++                local.ready_tasks++;
++                break;
++
++              case TSTATE_WAIT_SEM:
++                local.blocked_sem++;
++                break;
++
++              case TSTATE_WAIT_SIG:
++                local.blocked_sig++;
++                break;
++
++              default:
++                if (tcb->task_state >= FIRST_BLOCKED_STATE)
++                  {
++                    local.blocked_other++;
++                  }
++                break;
++            }
++
++          switch (tcb->flags & TCB_FLAG_TTYPE_MASK)
++            {
++              case TCB_FLAG_TTYPE_KERNEL:
++                local.kernel_threads++;
++                break;
++
++              case TCB_FLAG_TTYPE_PTHREAD:
++                local.pthreads++;
++                break;
++
++              case TCB_FLAG_TTYPE_TASK:
++              default:
++                local.user_tasks++;
++                break;
++            }
++
++          if (tcb->sched_priority < min_prio)
++            {
++              min_prio = tcb->sched_priority;
++            }
++
++          if (tcb->sched_priority > max_prio)
++            {
++              max_prio = tcb->sched_priority;
++            }
++        }
++    }
++
++  leave_critical_section(irqflags);
++
++  if (local.total_tasks > 0u)
++    {
++      local.min_priority = min_prio;
++      local.max_priority = max_prio;
++    }
++
++  *stats = local;
++  return OK;
++}
++
++int sched_getstats(FAR struct sched_stats_s *stats, unsigned int flags)
++{
++  int ret;
++
++  ret = nxsched_get_stats(stats, flags);
++  if (ret < 0)
++    {
++      set_errno(-ret);
++      return ERROR;
++    }
++
++  return OK;
++}
+diff --git a/syscall/syscall.csv b/syscall/syscall.csv
+index 8a1d685fa4..63415c87cb 100644
+--- a/syscall/syscall.csv
++++ b/syscall/syscall.csv
+@@ -143,6 +143,7 @@
+ "sched_getcpu","sched.h","","int"
+ "sched_getparam","sched.h","","int","pid_t","FAR struct sched_param *"
+ "sched_getscheduler","sched.h","","int","pid_t"
++"sched_getstats","sys/sched_stats.h","","int","FAR struct sched_stats_s *","unsigned int"
+ "sched_lock","sched.h","","void"
+ "sched_lockcount","sched.h","","int"
+ "sched_note_event_ip","nuttx/sched_note.h","defined(CONFIG_SCHED_INSTRUMENTATION_DUMP)","void","uint32_t","uintptr_t","uint8_t","FAR const void *","size_t"
